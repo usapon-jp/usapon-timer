@@ -1,10 +1,12 @@
-const CACHE_NAME = "usapon-timer-v15";
+const CACHE_NAME = "usapon-timer-v16";
 const BASE_PATH = "/usapon-timer/";
 const APP_SHELL = [
   BASE_PATH,
   `${BASE_PATH}manifest.webmanifest`,
-  `${BASE_PATH}icons/icon.svg`,
-  `${BASE_PATH}icons/maskable.svg`
+  `${BASE_PATH}icons/icon-192.png`,
+  `${BASE_PATH}icons/icon-512.png`,
+  `${BASE_PATH}icons/maskable-512.png`,
+  `${BASE_PATH}icons/apple-touch-icon.png`
 ];
 
 self.addEventListener("install", (event) => {

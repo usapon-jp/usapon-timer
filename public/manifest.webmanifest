@@ -23,15 +23,9 @@
       "purpose": "any"
     },
     {
-      "src": "/usapon-timer/icons/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
-    },
-    {
-      "src": "/usapon-timer/icons/maskable.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/usapon-timer/icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "maskable"
     }
   ],
