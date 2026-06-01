@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { registerServiceWorker } from "./registerServiceWorker";
 import {
   BookOpen,
+  BellRing,
   Check,
   ChevronLeft,
   CirclePause,
@@ -26,6 +27,7 @@ const STORAGE_KEY = "usapon-timer-state-v1";
 const MAX_STORED_SESSIONS = 365;
 const FOCUS_PRESETS = [10, 25, 50];
 const DEFAULT_DAILY_GOAL_MINUTES = 180;
+const ALARM_PATTERN_MS = 9000;
 const WORK_TYPES = {
   revenue: "収益作業",
   future: "未来投資作業",
@@ -106,6 +108,7 @@ function defaultState() {
       running: false,
       startedAt: null,
       elapsedBeforeStart: 0,
+      alarmFiredAt: null,
       lastDisplaySeconds: 25 * 60,
     },
     chartSettings: {
@@ -427,6 +430,12 @@ function App() {
   const [nowTick, setNowTick] = useState(Date.now());
   const [completionDraft, setCompletionDraft] = useState(null);
   const [rewardToast, setRewardToast] = useState(null);
+  const [alarmEnabled, setAlarmEnabled] = useState(true);
+  const [notificationStatus, setNotificationStatus] = useState(() => (
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission
+  ));
+  const audioContextRef = React.useRef(null);
+  const alarmTimeoutsRef = React.useRef([]);
   const subjects = state.subjects?.length ? state.subjects : DEFAULT_SUBJECTS;
   const activeOutfit = OUTFITS.find((item) => item.id === state.selectedOutfitId) || OUTFITS[0];
   const selectedSubject = subjects.find((item) => item.id === state.selectedSubject) || subjects[0];
@@ -448,13 +457,134 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (state.timer.mode === "focus" && state.timer.running && remainingOrElapsed <= 0 && !completionDraft) {
-      openCompletionSheet();
+    if (state.timer.mode === "focus" && state.timer.running && remainingOrElapsed <= 0 && !state.timer.alarmFiredAt && !completionDraft) {
+      fireTimerFinishedAlarm();
     }
-  }, [remainingOrElapsed, state.timer.mode, state.timer.running, completionDraft]);
+  }, [remainingOrElapsed, state.timer.mode, state.timer.running, state.timer.alarmFiredAt, completionDraft]);
+
+  useEffect(() => {
+    function handleVisibilityOrFocus() {
+      setNowTick(Date.now());
+      if (state.timer.mode === "focus" && state.timer.running && displaySeconds(state.timer, Date.now()) <= 0 && !state.timer.alarmFiredAt && !completionDraft) {
+        fireTimerFinishedAlarm();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    window.addEventListener("pageshow", handleVisibilityOrFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      window.removeEventListener("pageshow", handleVisibilityOrFocus);
+    };
+  }, [state.timer, completionDraft]);
+
+  useEffect(() => () => {
+    stopAlarm();
+  }, []);
+
+  function ensureAudioContext() {
+    if (!audioContextRef.current) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      audioContextRef.current = AudioContextClass ? new AudioContextClass() : null;
+    }
+    if (audioContextRef.current?.state === "suspended") {
+      audioContextRef.current.resume().catch(() => {});
+    }
+    return audioContextRef.current;
+  }
+
+  function stopAlarm() {
+    alarmTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    alarmTimeoutsRef.current = [];
+  }
+
+  function playAlarmTone(context, startOffset = 0) {
+    [0, 0.16, 0.34].forEach((offset, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = [784, 988, 1318][index];
+      const at = context.currentTime + startOffset + offset;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.16, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.24);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(at);
+      oscillator.stop(at + 0.28);
+    });
+  }
+
+  function playAlarm() {
+    if (!alarmEnabled) return;
+    stopAlarm();
+    const context = ensureAudioContext();
+    if (context) {
+      const repeats = Math.ceil(ALARM_PATTERN_MS / 1300);
+      Array.from({ length: repeats }).forEach((_, index) => {
+        const timeoutId = window.setTimeout(() => playAlarmTone(context), index * 1300);
+        alarmTimeoutsRef.current.push(timeoutId);
+      });
+    }
+    if (navigator.vibrate) {
+      navigator.vibrate([250, 120, 250, 120, 500]);
+    }
+  }
+
+  async function showTimerNotification(session) {
+    if (!alarmEnabled || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    try {
+      if ("serviceWorker" in navigator) {
+        const registration = await navigator.serviceWorker.ready;
+        await registration.showNotification("うさぽんタイマー", {
+          body: `${session.minutes}分の作業が終わりました。記録を残しましょう。`,
+          icon: `${import.meta.env.BASE_URL}icons/icon-192.png`,
+          badge: `${import.meta.env.BASE_URL}icons/icon-192.png`,
+          tag: "usapon-timer-finished",
+          requireInteraction: true,
+          vibrate: [250, 120, 250],
+        });
+      }
+    } catch {
+      // Notification support varies across mobile browsers.
+    }
+  }
+
+  async function requestNotifications() {
+    if (typeof Notification === "undefined") {
+      setNotificationStatus("unsupported");
+      return;
+    }
+    ensureAudioContext();
+    if (Notification.permission === "default") {
+      const result = await Notification.requestPermission();
+      setNotificationStatus(result);
+      return;
+    }
+    setNotificationStatus(Notification.permission);
+  }
+
+  function fireTimerFinishedAlarm() {
+    const draft = makeCompletionPayload(state);
+    playAlarm();
+    showTimerNotification(draft);
+    setState((current) => {
+      if (current.timer.alarmFiredAt) return current;
+      return {
+        ...current,
+        timer: {
+          ...current.timer,
+          alarmFiredAt: Date.now(),
+        },
+      };
+    });
+  }
 
   function changeMode(mode) {
     setCompletionDraft(null);
+    stopAlarm();
     setState((current) => ({
       ...current,
       timer: {
@@ -463,6 +593,7 @@ function App() {
         running: false,
         startedAt: null,
         elapsedBeforeStart: 0,
+        alarmFiredAt: null,
         lastDisplaySeconds: mode === "focus" ? current.timer.focusMinutes * 60 : 0,
       },
     }));
@@ -470,6 +601,7 @@ function App() {
 
   function setFocusMinutes(minutes) {
     setCompletionDraft(null);
+    stopAlarm();
     setState((current) => ({
       ...current,
       timer: {
@@ -478,6 +610,7 @@ function App() {
         running: false,
         startedAt: null,
         elapsedBeforeStart: 0,
+        alarmFiredAt: null,
         lastDisplaySeconds: minutes * 60,
       },
     }));
@@ -485,18 +618,22 @@ function App() {
 
   function startTimer() {
     setCompletionDraft(null);
+    stopAlarm();
+    ensureAudioContext();
     setState((current) => ({
       ...current,
       timer: {
         ...current.timer,
         running: true,
         startedAt: Date.now(),
+        alarmFiredAt: null,
       },
     }));
     setTab("timer");
   }
 
   function pauseTimer() {
+    stopAlarm();
     setState((current) => ({
       ...current,
       timer: {
@@ -510,6 +647,7 @@ function App() {
 
   function resetTimer() {
     setCompletionDraft(null);
+    stopAlarm();
     setState((current) => ({
       ...current,
       timer: {
@@ -517,6 +655,7 @@ function App() {
         running: false,
         startedAt: null,
         elapsedBeforeStart: 0,
+        alarmFiredAt: null,
         lastDisplaySeconds: current.timer.mode === "focus" ? current.timer.focusMinutes * 60 : 0,
       },
     }));
@@ -545,6 +684,7 @@ function App() {
     const seconds = elapsedSeconds(state.timer, Date.now());
     if (!state.timer.running && seconds < 10) return;
     const draft = makeCompletionPayload(state);
+    stopAlarm();
     setState((current) => ({
       ...current,
       timer: {
@@ -570,6 +710,7 @@ function App() {
         running: false,
         startedAt: null,
         elapsedBeforeStart: 0,
+        alarmFiredAt: null,
         lastDisplaySeconds: current.timer.mode === "focus" ? current.timer.focusMinutes * 60 : 0,
       },
     };
@@ -577,6 +718,7 @@ function App() {
 
   function saveCompletion(details) {
     if (!completionDraft) return;
+    stopAlarm();
     const session = normalizeSession({ ...completionDraft, ...details }, subjects);
     setState((current) => applySession(current, session));
     setCompletionDraft(null);
@@ -749,6 +891,10 @@ function App() {
               resetTimer={resetTimer}
               completeSession={openCompletionSheet}
               rewardToast={rewardToast}
+              alarmEnabled={alarmEnabled}
+              notificationStatus={notificationStatus}
+              requestNotifications={requestNotifications}
+              toggleAlarm={() => setAlarmEnabled((enabled) => !enabled)}
               setSubject={(id) => setState((current) => ({ ...current, selectedSubject: id }))}
               setTab={setTab}
             />
@@ -782,7 +928,10 @@ function App() {
               draft={completionDraft}
               subject={subjects.find((item) => item.id === completionDraft.subject) || selectedSubject}
               onSave={saveCompletion}
-              onCancel={() => setCompletionDraft(null)}
+              onCancel={() => {
+                stopAlarm();
+                setCompletionDraft(null);
+              }}
             />
           )}
         </PhoneFrame>
@@ -906,7 +1055,29 @@ function QuickTile({ icon, label, onClick }) {
   return <button className="quick-tile" type="button" onClick={onClick}>{icon}<span>{label}</span></button>;
 }
 
-function TimerScreen({ state, subjects, subject, outfit, displayValue, spentSeconds, overtimeSeconds, progress, changeMode, setFocusMinutes, startTimer, pauseTimer, resetTimer, completeSession, rewardToast, setSubject, setTab }) {
+function TimerScreen({
+  state,
+  subjects,
+  subject,
+  outfit,
+  displayValue,
+  spentSeconds,
+  overtimeSeconds,
+  progress,
+  changeMode,
+  setFocusMinutes,
+  startTimer,
+  pauseTimer,
+  resetTimer,
+  completeSession,
+  rewardToast,
+  alarmEnabled,
+  notificationStatus,
+  requestNotifications,
+  toggleAlarm,
+  setSubject,
+  setTab,
+}) {
   const [subjectPickerOpen, setSubjectPickerOpen] = useState(false);
   const [customFocusOpen, setCustomFocusOpen] = useState(false);
   const [customFocusMinutes, setCustomFocusMinutes] = useState(String(state.timer.focusMinutes || 25));
@@ -959,6 +1130,18 @@ function TimerScreen({ state, subjects, subject, outfit, displayValue, spentSeco
         {!isRunning ? <button className="pill-action primary" type="button" onClick={startTimer}><CirclePlay size={19} />開始</button> : <button className="pill-action primary" type="button" onClick={pauseTimer}><CirclePause size={19} />一時停止</button>}
         <button className="pill-action" type="button" onClick={completeSession} disabled={spentSeconds < 10}><Check size={18} />完了</button>
         <button className="round-action" type="button" onClick={resetTimer} aria-label="リセット"><RotateCcw size={18} /></button>
+      </div>
+      <div className="alarm-card">
+        <div>
+          <span><BellRing size={17} />アラーム</span>
+          <small>予定時間を過ぎても止めるまで超過時間を数えます</small>
+        </div>
+        <button type="button" className={alarmEnabled ? "active" : ""} onClick={toggleAlarm}>
+          {alarmEnabled ? "ON" : "OFF"}
+        </button>
+        <button type="button" onClick={requestNotifications} disabled={notificationStatus === "granted" || notificationStatus === "unsupported"}>
+          {notificationStatus === "granted" ? "通知OK" : notificationStatus === "denied" ? "通知OFF" : notificationStatus === "unsupported" ? "通知非対応" : "通知を許可"}
+        </button>
       </div>
       <div className="bonus-card"><span><Sprout size={17} />獲得pt</span><b>+{rewardFor(Math.max(1, Math.round(spentSeconds / 60)))} pt</b><progress value={Math.min(100, Math.round(progress * 100))} max="100" /></div>
       {rewardToast && <div className="reward-get-toast" role="status" aria-live="polite"><span>+{rewardToast.reward}pt</span><strong>GET</strong></div>}

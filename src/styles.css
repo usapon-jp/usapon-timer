@@ -2290,6 +2290,63 @@ button:disabled {
   white-space: nowrap;
 }
 
+.alarm-card {
+  align-items: center;
+  background: rgba(255, 250, 238, 0.9);
+  border: 1px solid rgba(126, 103, 73, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 18px rgba(79, 58, 37, 0.06);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr auto auto;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.alarm-card div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.alarm-card span {
+  align-items: center;
+  color: #4f3a25;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 800;
+  gap: 5px;
+}
+
+.alarm-card small {
+  color: #8c765c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.alarm-card button {
+  border: 0;
+  border-radius: 999px;
+  background: #fff6e2;
+  color: #6f5b43;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 800;
+  min-height: 32px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.alarm-card button.active {
+  background: linear-gradient(180deg, #8da76f, #6b854f);
+  color: #fffdf7;
+}
+
+.alarm-card button:disabled {
+  opacity: 0.58;
+}
+
 .record-tabs {
   background: rgba(235, 218, 190, 0.45);
   border-radius: 999px;
@@ -2624,6 +2681,14 @@ button:disabled {
   }
 
   .work-type-toggle {
+    grid-column: 1 / -1;
+  }
+
+  .alarm-card {
+    grid-template-columns: 1fr 58px;
+  }
+
+  .alarm-card button:last-child {
     grid-column: 1 / -1;
   }
 }

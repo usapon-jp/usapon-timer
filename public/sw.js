@@ -1,4 +1,4 @@
-const CACHE_NAME = "usapon-timer-v14";
+const CACHE_NAME = "usapon-timer-v15";
 const BASE_PATH = "/usapon-timer/";
 const APP_SHELL = [
   BASE_PATH,
@@ -43,5 +43,23 @@ self.addEventListener("fetch", (event) => {
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
       return response;
     }))
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      const targetUrl = new URL(BASE_PATH, self.location.origin).href;
+      for (const client of clientList) {
+        if (client.url.startsWith(targetUrl) && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) {
+        return clients.openWindow(BASE_PATH);
+      }
+      return undefined;
+    })
   );
 });
