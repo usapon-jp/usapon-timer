@@ -9,6 +9,7 @@ import {
   CirclePause,
   CirclePlay,
   Clock3,
+  Download,
   Home,
   Palette,
   Pencil,
@@ -20,10 +21,12 @@ import {
   Sprout,
   Trash2,
   Trophy,
+  Upload,
 } from "lucide-react";
 import "./styles.css";
 
 const STORAGE_KEY = "usapon-timer-state-v1";
+const BACKUP_VERSION = 1;
 const MAX_STORED_SESSIONS = 365;
 const FOCUS_PRESETS = [10, 25, 50];
 const DEFAULT_DAILY_GOAL_MINUTES = 180;
@@ -424,12 +427,17 @@ function formatCurrency(amount) {
   return `¥${yenFormatter.format(Math.max(0, Math.round(Number(amount || 0))))}`;
 }
 
+function backupFileName() {
+  return `usapon-timer-backup-${todayKey()}.json`;
+}
+
 function App() {
   const [state, setState] = useState(loadState);
   const [tab, setTab] = useState("home");
   const [nowTick, setNowTick] = useState(Date.now());
   const [completionDraft, setCompletionDraft] = useState(null);
   const [rewardToast, setRewardToast] = useState(null);
+  const [dataManagerOpen, setDataManagerOpen] = useState(false);
   const [alarmEnabled, setAlarmEnabled] = useState(true);
   const [notificationStatus, setNotificationStatus] = useState(() => (
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
@@ -727,6 +735,46 @@ function App() {
     setTab("home");
   }
 
+  function exportBackup() {
+    const payload = {
+      app: "usapon-timer",
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      data: normalizeState(state),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = backupFileName();
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function importBackupFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ""));
+        const rawData = parsed?.app === "usapon-timer" && parsed?.data ? parsed.data : parsed;
+        const restored = normalizeState(rawData);
+        const ok = window.confirm("現在の端末内データを、選んだバックアップで上書きします。よろしいですか？");
+        if (!ok) return;
+        stopAlarm();
+        setCompletionDraft(null);
+        setState(restored);
+        setDataManagerOpen(false);
+        setTab("home");
+      } catch {
+        window.alert("バックアップファイルを読み込めませんでした。うさぽんタイマーのJSONファイルか確認してください。");
+      }
+    };
+    reader.readAsText(file);
+  }
+
   function updateChartSettings(nextSettings) {
     setState((current) => ({
       ...current,
@@ -872,6 +920,7 @@ function App() {
               startTimer={startTimer}
               setSubject={(id) => setState((current) => ({ ...current, selectedSubject: id }))}
               updateDailyGoal={updateDailyGoal}
+              openDataManager={() => setDataManagerOpen(true)}
             />
           )}
           {tab === "timer" && (
@@ -934,6 +983,13 @@ function App() {
               }}
             />
           )}
+          {dataManagerOpen && (
+            <DataManagementSheet
+              onExport={exportBackup}
+              onImport={importBackupFile}
+              onClose={() => setDataManagerOpen(false)}
+            />
+          )}
         </PhoneFrame>
       </div>
     </main>
@@ -976,7 +1032,7 @@ function TopBar({ title, points, onBack, avatarSrc }) {
   );
 }
 
-function HomeScreen({ state, subjects, outfit, subject, progress, setTab, startTimer, setSubject, updateDailyGoal }) {
+function HomeScreen({ state, subjects, outfit, subject, progress, setTab, startTimer, setSubject, updateDailyGoal, openDataManager }) {
   const [goalOpen, setGoalOpen] = useState(false);
   const [goalHours, setGoalHours] = useState(String(Math.floor((state.dailyGoalMinutes || DEFAULT_DAILY_GOAL_MINUTES) / 60)));
   const [goalMinutes, setGoalMinutes] = useState(String((state.dailyGoalMinutes || DEFAULT_DAILY_GOAL_MINUTES) % 60));
@@ -1045,6 +1101,7 @@ function HomeScreen({ state, subjects, outfit, subject, progress, setTab, startT
         <QuickTile icon={<Trophy size={24} />} label="ごほうび" onClick={() => setTab("wardrobe")} />
         <QuickTile icon={<Shirt size={24} />} label="衣装" onClick={() => setTab("closet")} />
         <QuickTile icon={<SlidersHorizontal size={24} />} label="カテゴリ" onClick={() => setTab("subjects")} />
+        <QuickTile icon={<Download size={24} />} label="データ" onClick={openDataManager} />
       </div>
       <p className="soft-line">{subject.label}を少しずつ積み上げよう。完了するとptがもらえるよ。</p>
     </div>
@@ -1053,6 +1110,49 @@ function HomeScreen({ state, subjects, outfit, subject, progress, setTab, startT
 
 function QuickTile({ icon, label, onClick }) {
   return <button className="quick-tile" type="button" onClick={onClick}>{icon}<span>{label}</span></button>;
+}
+
+function DataManagementSheet({ onExport, onImport, onClose }) {
+  const inputId = "backup-file-input";
+
+  return (
+    <div className="chart-settings-overlay" role="dialog" aria-modal="true" aria-label="データ管理">
+      <button className="settings-scrim" type="button" aria-label="閉じる" onClick={onClose} />
+      <section className="chart-settings-sheet compact-picker-sheet data-management-sheet">
+        <div className="sheet-head">
+          <div>
+            <span><Download size={16} />データ管理</span>
+            <small>端末内の記録をJSONで保存・復元できます</small>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="閉じる">×</button>
+        </div>
+        <div className="backup-actions">
+          <button className="backup-action primary" type="button" onClick={onExport}>
+            <Download size={18} />
+            <span>バックアップを保存</span>
+            <small>記録・売上・カテゴリ・ptを書き出します</small>
+          </button>
+          <label className="backup-action" htmlFor={inputId}>
+            <Upload size={18} />
+            <span>バックアップから復元</span>
+            <small>選んだJSONで現在の端末内データを上書きします</small>
+          </label>
+          <input
+            id={inputId}
+            className="backup-file-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              onImport(file);
+            }}
+          />
+        </div>
+        <p className="backup-note">復元前に今のデータも必要なら、先にバックアップを保存してください。</p>
+      </section>
+    </div>
+  );
 }
 
 function TimerScreen({
