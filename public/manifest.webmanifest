@@ -1,0 +1,40 @@
+{
+  "name": "うさぽんタイマー",
+  "short_name": "うさぽん",
+  "description": "制作や事務作業の時間をやさしく積み上げて振り返る作業記録アプリ。",
+  "lang": "ja",
+  "start_url": "/usapon-timer/",
+  "scope": "/usapon-timer/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fff9ec",
+  "theme_color": "#7f985e",
+  "icons": [
+    {
+      "src": "/usapon-timer/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/usapon-timer/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/usapon-timer/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/usapon-timer/icons/maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["education", "productivity"],
+  "screenshots": []
+}
