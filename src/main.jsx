@@ -40,6 +40,37 @@ const ALARM_PATTERN_MS = 9000;
 const BGM_DB_NAME = "usapon-timer-bgm";
 const BGM_DB_VERSION = 1;
 const BGM_STORE_NAME = "tracks";
+const BGM_EXPORT_MAX_BLOB_BYTES = 18 * 1024 * 1024;
+const VIDEO_AUDIO_TARGET_SAMPLE_RATE = 22050;
+const VIDEO_COMPACT_MAX_WIDTH = 480;
+const VIDEO_COMPACT_FPS = 18;
+const SUPPORTED_BGM_AUDIO_EXTENSIONS = ["m4a", "mp3", "aac", "wav", "ogg"];
+const SUPPORTED_BGM_AUDIO_MIME_TYPES = [
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/m4a",
+  "audio/aac",
+  "audio/aacp",
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/wave",
+  "audio/x-wav",
+  "audio/ogg",
+  "application/ogg",
+];
+const SUPPORTED_BGM_AUDIO_LABEL = ".m4a / .mp3 / .aac / .wav / .ogg";
+const BGM_FILE_ACCEPT = [
+  ...SUPPORTED_BGM_AUDIO_EXTENSIONS.map((extension) => `.${extension}`),
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/aac",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/ogg",
+  "application/ogg",
+  "video/*",
+].join(",");
 const STANDARD_BGM_TRACKS = [
   { id: "standard-bgm-1", name: "標準BGM 1", kind: "audio", type: "standard", src: "audio/study-bgm-1.mp3", mimeType: "audio/mpeg" },
   { id: "standard-bgm-2", name: "標準BGM 2", kind: "audio", type: "standard", src: "audio/study-bgm-2.mp3", mimeType: "audio/mpeg" },
@@ -76,6 +107,7 @@ const OUTFITS = [
   { id: "outfit-n-2", name: "やさしいカーデ", cost: 400 },
   { id: "outfit-n-3", name: "リボンワンピース", cost: 600 },
   { id: "outfit-r-1", name: "ナチュラルワンピ", cost: 450 },
+  { id: "outfit-sunflower", name: "ひまわりの服", cost: 700, saleCost: 500, saleEndsAt: "2026-06-18T23:59:59+09:00" },
 ];
 const DEFAULT_OUTFIT_ID = "outfit-n-1";
 const OUTFIT_IDS = new Set(OUTFITS.map((outfit) => outfit.id));
@@ -84,6 +116,7 @@ const STUDY_IMAGES = {
   "outfit-n-2": "study/full/outfit-n-2.png",
   "outfit-n-3": "study/full/outfit-n-3.png",
   "outfit-r-1": "study/full/outfit-r-1.png",
+  "outfit-sunflower": "study/full/outfit-sunflower.png",
 };
 const SUBJECT_ICON_VERSION = "20260601-usapon-work";
 const yenFormatter = new Intl.NumberFormat("ja-JP");
@@ -100,6 +133,22 @@ function subjectIconSrc(icon) {
 
 function studyImageFor(outfitId) {
   return STUDY_IMAGES[outfitId] || STUDY_IMAGES[DEFAULT_OUTFIT_ID];
+}
+
+function outfitSaleActive(outfit, at = Date.now()) {
+  if (!outfit?.saleCost || !outfit?.saleEndsAt) return false;
+  return at <= new Date(outfit.saleEndsAt).getTime();
+}
+
+function outfitPrice(outfit, at = Date.now()) {
+  return outfitSaleActive(outfit, at) ? outfit.saleCost : outfit.cost;
+}
+
+function outfitSaleLabel(outfit) {
+  if (!outfit?.saleEndsAt) return "";
+  const end = new Date(outfit.saleEndsAt);
+  if (Number.isNaN(end.getTime())) return "";
+  return `${end.getMonth() + 1}/${end.getDate()}まで`;
 }
 
 function todayKey() {
@@ -512,12 +561,289 @@ function backupFileName() {
   return `usapon-timer-backup-${todayKey()}.json`;
 }
 
+function bgmLibraryFileName() {
+  return `usapon-timer-bgm-library-${todayKey()}.json`;
+}
+
+function createAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  return AudioContextClass ? new AudioContextClass() : null;
+}
+
 function inferBgmKind(file) {
   const type = file?.type || "";
+  const extension = fileExtension(file);
+  if (isSupportedBgmAudioFile(file)) return "audio";
   const name = (file?.name || "").toLowerCase();
-  if (type.startsWith("video/") || /\.(mov|mp4|m4v|webm)$/i.test(name)) return "video";
-  if (type.startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|oga|flac)$/i.test(name)) return "audio";
+  if (type.startsWith("video/") || ["mov", "mp4", "m4v", "webm"].includes(extension) || /\.(mov|mp4|m4v|webm)$/i.test(name)) return "video";
   return "";
+}
+
+function fileExtension(file) {
+  const name = (file?.name || "").toLowerCase();
+  const match = name.match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : "";
+}
+
+function normalizedMimeType(type) {
+  return String(type || "").split(";")[0].trim().toLowerCase();
+}
+
+function mimeTypeForAudioExtension(extension) {
+  return {
+    m4a: "audio/mp4",
+    mp3: "audio/mpeg",
+    aac: "audio/aac",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+  }[extension] || "";
+}
+
+function isSupportedBgmAudioFile(file) {
+  const extension = fileExtension(file);
+  const mimeType = normalizedMimeType(file?.type);
+  return SUPPORTED_BGM_AUDIO_EXTENSIONS.includes(extension) || SUPPORTED_BGM_AUDIO_MIME_TYPES.includes(mimeType);
+}
+
+function audioMimeCandidates(file) {
+  const extension = fileExtension(file);
+  const mimeType = normalizedMimeType(file?.type);
+  return [...new Set([
+    mimeType,
+    mimeTypeForAudioExtension(extension),
+    extension === "m4a" ? "audio/x-m4a" : "",
+    extension === "mp3" ? "audio/mp3" : "",
+  ].filter(Boolean))];
+}
+
+async function verifyAudioFilePlayable(file) {
+  if (!isSupportedBgmAudioFile(file)) {
+    throw new Error("unsupported audio format");
+  }
+  const audio = document.createElement("audio");
+  const candidates = audioMimeCandidates(file);
+  const hasLikelyType = !candidates.length || candidates.some((mimeType) => {
+    const result = audio.canPlayType(mimeType);
+    return result === "probably" || result === "maybe";
+  });
+  if (!hasLikelyType) {
+    throw new Error("audio format not playable");
+  }
+  await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      audio.removeAttribute("src");
+      audio.load();
+      URL.revokeObjectURL(url);
+    };
+    const succeed = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("audio metadata unavailable"));
+    };
+    const timeoutId = window.setTimeout(fail, 5000);
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      window.clearTimeout(timeoutId);
+      succeed();
+    };
+    audio.oncanplay = () => {
+      window.clearTimeout(timeoutId);
+      succeed();
+    };
+    audio.onerror = () => {
+      window.clearTimeout(timeoutId);
+      fail();
+    };
+    audio.src = url;
+    audio.load();
+  });
+}
+
+function encodeMonoWavFromAudioBuffer(audioBuffer, targetSampleRate = VIDEO_AUDIO_TARGET_SAMPLE_RATE) {
+  const duration = audioBuffer.duration || 0;
+  const sourceSampleRate = audioBuffer.sampleRate || targetSampleRate;
+  const sampleCount = Math.max(1, Math.floor(duration * targetSampleRate));
+  const pcmBytes = sampleCount * 2;
+  const buffer = new ArrayBuffer(44 + pcmBytes);
+  const view = new DataView(buffer);
+  const channels = [];
+  for (let channel = 0; channel < audioBuffer.numberOfChannels; channel += 1) {
+    channels.push(audioBuffer.getChannelData(channel));
+  }
+
+  function writeString(offset, value) {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  }
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + pcmBytes, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, pcmBytes, true);
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const sourceIndex = Math.min(channels[0].length - 1, Math.floor((index * sourceSampleRate) / targetSampleRate));
+    let sample = 0;
+    for (const channelData of channels) {
+      sample += channelData[sourceIndex] || 0;
+    }
+    sample = Math.max(-1, Math.min(1, sample / Math.max(1, channels.length)));
+    view.setInt16(44 + index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function tryConvertVideoToAudioBlob(file) {
+  const context = createAudioContext();
+  if (!context?.decodeAudioData) throw new Error("audio decode unavailable");
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const decoded = await context.decodeAudioData(arrayBuffer);
+    return encodeMonoWavFromAudioBuffer(decoded);
+  } finally {
+    context.close?.();
+  }
+}
+
+function pickMediaRecorderMimeType() {
+  if (!window.MediaRecorder) return "";
+  const types = [
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ];
+  return types.find((type) => window.MediaRecorder.isTypeSupported?.(type)) || "";
+}
+
+function loadVideoMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadedmetadata = () => {
+      const width = video.videoWidth || VIDEO_COMPACT_MAX_WIDTH;
+      const height = video.videoHeight || VIDEO_COMPACT_MAX_WIDTH;
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      URL.revokeObjectURL(url);
+      resolve({ width, height, duration });
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("video metadata unavailable"));
+    };
+    video.src = url;
+  });
+}
+
+async function tryCompactVideoBlob(file) {
+  const mimeType = pickMediaRecorderMimeType();
+  if (!mimeType) throw new Error("media recorder unavailable");
+  const metadata = await loadVideoMetadata(file);
+  const scale = Math.min(1, VIDEO_COMPACT_MAX_WIDTH / Math.max(1, metadata.width));
+  const width = Math.max(1, Math.round(metadata.width * scale));
+  const height = Math.max(1, Math.round(metadata.height * scale));
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context || !canvas.captureStream) {
+    URL.revokeObjectURL(url);
+    throw new Error("canvas capture unavailable");
+  }
+
+  await new Promise((resolve, reject) => {
+    video.onloadeddata = resolve;
+    video.onerror = () => reject(new Error("video load unavailable"));
+    video.src = url;
+  });
+
+  const outputStream = canvas.captureStream(VIDEO_COMPACT_FPS);
+  const audioContext = createAudioContext();
+  if (audioContext?.createMediaElementSource && audioContext?.createMediaStreamDestination) {
+    try {
+      const source = audioContext.createMediaElementSource(video);
+      const destination = audioContext.createMediaStreamDestination();
+      source.connect(destination);
+      destination.stream.getAudioTracks().forEach((track) => outputStream.addTrack(track));
+    } catch {
+      // Keep the resized video even if the browser will not expose the audio track.
+    }
+  }
+
+  const chunks = [];
+  const recorder = new MediaRecorder(outputStream, { mimeType, videoBitsPerSecond: 450_000 });
+  const done = new Promise((resolve, reject) => {
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size) chunks.push(event.data);
+    };
+    recorder.onstop = resolve;
+    recorder.onerror = () => reject(recorder.error || new Error("video compact unavailable"));
+  });
+
+  let drawTimer = null;
+  function drawFrame() {
+    context.drawImage(video, 0, 0, width, height);
+  }
+
+  recorder.start(1000);
+  drawTimer = window.setInterval(drawFrame, Math.round(1000 / VIDEO_COMPACT_FPS));
+  drawFrame();
+  await video.play();
+  await new Promise((resolve) => {
+    video.onended = resolve;
+    const maxDuration = metadata.duration ? (metadata.duration + 1) * 1000 : 180000;
+    window.setTimeout(resolve, maxDuration);
+  });
+  if (recorder.state !== "inactive") recorder.stop();
+  await done;
+  if (drawTimer) window.clearInterval(drawTimer);
+  video.pause();
+  audioContext?.close?.();
+  URL.revokeObjectURL(url);
+
+  if (!chunks.length) throw new Error("video compact empty");
+  return new Blob(chunks, { type: recorder.mimeType || mimeType });
+}
+
+async function prepareVideoBgmBlob(file) {
+  try {
+    const audioBlob = await tryConvertVideoToAudioBlob(file);
+    return { blob: audioBlob, kind: "audio", mimeType: audioBlob.type || "audio/wav", status: "audio" };
+  } catch {
+    // Try a smaller video when the browser cannot decode audio directly from the video file.
+  }
+  try {
+    const compactBlob = await tryCompactVideoBlob(file);
+    return { blob: compactBlob, kind: "video", mimeType: compactBlob.type || "video/mp4", status: "compact-video" };
+  } catch {
+    return { blob: file, kind: "video", mimeType: file.type, status: "original-video" };
+  }
 }
 
 function openBgmDb() {
@@ -572,6 +898,27 @@ async function getBgmBlob(trackId) {
   });
 }
 
+async function listBgmBlobIds() {
+  const db = await openBgmDb();
+  return new Promise((resolve) => {
+    const transaction = db.transaction(BGM_STORE_NAME, "readonly");
+    const store = transaction.objectStore(BGM_STORE_NAME);
+    if (!store.getAllKeys) {
+      db.close();
+      resolve([]);
+      return;
+    }
+    const request = store.getAllKeys();
+    request.onsuccess = () => resolve((request.result || []).map(String));
+    request.onerror = () => resolve([]);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => {
+      db.close();
+      resolve([]);
+    };
+  });
+}
+
 async function deleteBgmBlob(trackId) {
   const db = await openBgmDb();
   return new Promise((resolve, reject) => {
@@ -586,6 +933,112 @@ async function deleteBgmBlob(trackId) {
       reject(transaction.error || new Error("BGMを削除できませんでした"));
     };
   });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("ファイルを読み込めませんでした"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function dataUrlToBlob(dataUrl) {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+    throw new Error("invalid data url");
+  }
+  const match = dataUrl.match(/^data:([^;,]*)(;base64)?,(.*)$/s);
+  if (!match) throw new Error("invalid data url");
+  const mimeType = match[1] || "application/octet-stream";
+  const isBase64 = Boolean(match[2]);
+  const payload = match[3] || "";
+  if (!isBase64) {
+    return new Blob([decodeURIComponent(payload)], { type: mimeType });
+  }
+  const binary = atob(payload.replace(/\s/g, ""));
+  const chunks = [];
+  const chunkSize = 1024 * 512;
+  for (let offset = 0; offset < binary.length; offset += chunkSize) {
+    const slice = binary.slice(offset, offset + chunkSize);
+    const bytes = new Uint8Array(slice.length);
+    for (let index = 0; index < slice.length; index += 1) {
+      bytes[index] = slice.charCodeAt(index);
+    }
+    chunks.push(bytes);
+  }
+  return new Blob(chunks, { type: mimeType });
+}
+
+function extractBgmLibraryPayload(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  if (Array.isArray(parsed.playlists)) {
+    return parsed;
+  }
+  const sound = parsed.sound || parsed.data?.sound || parsed.account?.data?.sound;
+  if (sound && Array.isArray(sound.playlists)) {
+    return {
+      app: "usapon-timer-bgm-library",
+      exportedAt: parsed.exportedAt || new Date().toISOString(),
+      deviceName: parsed.deviceName || "この端末",
+      selectedPlaylistId: sound.selectedPlaylistId,
+      playlists: sound.playlists,
+      customTracks: sound.customTracks || [],
+    };
+  }
+  return null;
+}
+
+function makeJsonFile(filename, payload) {
+  const blob = new Blob([typeof payload === "string" ? payload : JSON.stringify(payload, null, 2)], { type: "application/json" });
+  return new File([blob], filename, { type: "application/json" });
+}
+
+async function shareFile(file) {
+  if (navigator.canShare?.({ files: [file] }) && navigator.share) {
+    await navigator.share({ files: [file], title: file.name });
+    return "shared";
+  }
+  throw new Error("share unavailable");
+}
+
+function downloadFile(file) {
+  const url = URL.createObjectURL(file);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = file.name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return "downloaded";
+}
+
+function customTrackIdsFromSound(sound) {
+  const ids = new Set();
+  (sound?.customTracks || []).forEach((track) => {
+    if (track?.id && !STANDARD_BGM_TRACK_IDS.includes(track.id)) ids.add(track.id);
+  });
+  (sound?.playlists || []).forEach((playlist) => {
+    (playlist?.trackIds || []).forEach((trackId) => {
+      if (trackId && !STANDARD_BGM_TRACK_IDS.includes(trackId)) ids.add(trackId);
+    });
+  });
+  return [...ids];
+}
+
+function fallbackCustomTrack(trackId, blob) {
+  const kind = blob?.type?.startsWith("video/") ? "video" : "audio";
+  const extension = kind === "video" ? "mp4" : "mp3";
+  return {
+    id: trackId,
+    name: `追加BGM-${trackId.slice(-6)}`,
+    kind,
+    type: "custom",
+    mimeType: blob?.type || (kind === "video" ? "video/mp4" : "audio/mpeg"),
+    createdAt: new Date().toISOString(),
+    fileName: `${trackId}.${extension}`,
+  };
 }
 
 function deleteBgmDb() {
@@ -610,6 +1063,7 @@ function App() {
   const [dataManagerOpen, setDataManagerOpen] = useState(false);
   const [soundPanelOpen, setSoundPanelOpen] = useState(false);
   const [bgmLibraryMessage, setBgmLibraryMessage] = useState("");
+  const [pendingBgmExportFile, setPendingBgmExportFile] = useState(null);
   const [alarmEnabled, setAlarmEnabled] = useState(true);
   const [notificationStatus, setNotificationStatus] = useState(() => (
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
@@ -622,6 +1076,8 @@ function App() {
   const bgmCurrentTrackIdRef = useRef(null);
   const bgmObjectUrlRef = useRef(null);
   const bgmPreviewTimeoutRef = useRef(null);
+  const bgmLibraryPreviewRef = useRef(null);
+  const bgmLibraryPreviewUrlRef = useRef(null);
   const subjects = state.subjects?.length ? state.subjects : DEFAULT_SUBJECTS;
   const activeOutfit = OUTFITS.find((item) => item.id === state.selectedOutfitId) || OUTFITS[0];
   const selectedSubject = subjects.find((item) => item.id === state.selectedSubject) || subjects[0];
@@ -670,6 +1126,7 @@ function App() {
 
   useEffect(() => () => {
     stopBgm();
+    stopBgmLibraryPreview();
     if (bgmObjectUrlRef.current) URL.revokeObjectURL(bgmObjectUrlRef.current);
     stopAlarm();
   }, []);
@@ -815,6 +1272,55 @@ function App() {
       bgmPreviewTimeoutRef.current = null;
     }
     if (audio) audio.pause();
+  }
+
+  function stopBgmLibraryPreview() {
+    const media = bgmLibraryPreviewRef.current;
+    if (media) {
+      media.pause();
+      media.src = "";
+    }
+    bgmLibraryPreviewRef.current = null;
+    if (bgmLibraryPreviewUrlRef.current) {
+      URL.revokeObjectURL(bgmLibraryPreviewUrlRef.current);
+      bgmLibraryPreviewUrlRef.current = null;
+    }
+  }
+
+  async function toggleBgmLibraryPreview(trackId) {
+    const track = findBgmTrack(trackId);
+    if (!track) return;
+    if (bgmLibraryPreviewRef.current?.dataset?.trackId === trackId && !bgmLibraryPreviewRef.current.paused) {
+      stopBgmLibraryPreview();
+      setBgmLibraryMessage("試聴を停止しました");
+      return;
+    }
+    stopBgmLibraryPreview();
+    try {
+      const media = document.createElement(track.kind === "video" ? "video" : "audio");
+      media.dataset.trackId = trackId;
+      media.volume = 0.42;
+      media.playsInline = true;
+      media.preload = "auto";
+      media.onended = () => {
+        stopBgmLibraryPreview();
+        setBgmLibraryMessage("試聴が終わりました");
+      };
+      if (track.type === "standard") {
+        media.src = track.src;
+      } else {
+        const blob = await getBgmBlob(track.id);
+        if (!blob) throw new Error("missing bgm blob");
+        bgmLibraryPreviewUrlRef.current = URL.createObjectURL(blob);
+        media.src = bgmLibraryPreviewUrlRef.current;
+      }
+      bgmLibraryPreviewRef.current = media;
+      await media.play();
+      setBgmLibraryMessage(`「${track.name}」を試聴中です`);
+    } catch {
+      stopBgmLibraryPreview();
+      setBgmLibraryMessage("このBGMは試聴できませんでした");
+    }
   }
 
   function stopAlarm() {
@@ -1130,28 +1636,75 @@ function App() {
     }));
   }
 
+  function renameCustomBgmTrack(trackId, name) {
+    const nextName = name.slice(0, 80);
+    updateBgmSound((sound) => ({
+      ...sound,
+      customTracks: (sound.customTracks || []).map((track) => (
+        track.id === trackId ? { ...track, name: nextName } : track
+      )),
+    }));
+  }
+
   async function addBgmFiles(files, playlistId) {
-    const selectedFiles = Array.from(files || [])
-      .map((file) => ({ file, kind: inferBgmKind(file) }))
-      .filter((item) => item.kind);
+    const rawFiles = Array.from(files || []);
+    const classifiedFiles = rawFiles.map((file) => ({ file, kind: inferBgmKind(file) }));
+    const selectedFiles = classifiedFiles.filter((item) => item.kind);
+    const unsupportedFiles = classifiedFiles.length - selectedFiles.length;
     if (!selectedFiles.length) {
-      setBgmLibraryMessage("音楽または画面録画ファイルを選んでください");
+      setBgmLibraryMessage(`BGMを追加できませんでした。対応形式は ${SUPPORTED_BGM_AUDIO_LABEL} と画面録画/動画です`);
       return;
     }
     const addedTracks = [];
+    let extractedVideos = 0;
+    let compactedVideos = 0;
+    let originalVideos = 0;
+    let failedAudioFiles = 0;
+    let failedSaveFiles = 0;
     try {
       for (const { file, kind } of selectedFiles) {
-        const id = `custom-bgm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const track = {
-          id,
-          name: file.name.replace(/\.[^.]+$/, "").slice(0, 80) || "追加BGM",
-          kind,
-          type: "custom",
-          mimeType: file.type,
-          createdAt: new Date().toISOString(),
-        };
-        await putBgmBlob(id, file);
-        addedTracks.push(track);
+        try {
+          const id = `custom-bgm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          let blob = file;
+          let trackKind = kind;
+          let mimeType = file.type || mimeTypeForAudioExtension(fileExtension(file));
+          const trackExtras = {};
+          if (kind === "audio") {
+            setBgmLibraryMessage(`${file.name} を読み込めるか確認しています...`);
+            await verifyAudioFilePlayable(file);
+          }
+          if (kind === "video") {
+            setBgmLibraryMessage(`${file.name} をBGM用に軽くしています...`);
+            const prepared = await prepareVideoBgmBlob(file);
+            blob = prepared.blob;
+            trackKind = prepared.kind;
+            mimeType = prepared.mimeType;
+            trackExtras.sourceKind = "video";
+            trackExtras.originalFileName = file.name;
+            trackExtras.videoProcess = prepared.status;
+            if (prepared.status === "audio") extractedVideos += 1;
+            if (prepared.status === "compact-video") compactedVideos += 1;
+            if (prepared.status === "original-video") originalVideos += 1;
+          }
+          const track = {
+            id,
+            name: file.name.replace(/\.[^.]+$/, "").slice(0, 80) || "追加BGM",
+            kind: trackKind,
+            type: "custom",
+            mimeType,
+            createdAt: new Date().toISOString(),
+            ...trackExtras,
+          };
+          await putBgmBlob(id, blob);
+          addedTracks.push(track);
+        } catch {
+          if (kind === "audio") failedAudioFiles += 1;
+          else failedSaveFiles += 1;
+        }
+      }
+      if (!addedTracks.length) {
+        setBgmLibraryMessage(`BGMを追加できませんでした。対応形式は ${SUPPORTED_BGM_AUDIO_LABEL} と画面録画/動画です`);
+        return;
       }
       updateBgmSound((sound) => ({
         ...sound,
@@ -1162,9 +1715,19 @@ function App() {
             : playlist
         )),
       }));
-      setBgmLibraryMessage(`${addedTracks.length}件のBGMを追加しました`);
+      const conversionParts = [];
+      if (extractedVideos) conversionParts.push(`音声抽出 ${extractedVideos}件`);
+      if (compactedVideos) conversionParts.push(`軽量動画化 ${compactedVideos}件`);
+      if (originalVideos) conversionParts.push(`そのまま保存 ${originalVideos}件`);
+      const warning = originalVideos ? "。一部の動画はアップロードは難しいです。短めの画面録画にすると移植しやすくなります" : "";
+      const failedParts = [];
+      if (unsupportedFiles) failedParts.push(`未対応 ${unsupportedFiles}件`);
+      if (failedAudioFiles) failedParts.push(`再生確認失敗 ${failedAudioFiles}件`);
+      if (failedSaveFiles) failedParts.push(`保存失敗 ${failedSaveFiles}件`);
+      const failedNote = failedParts.length ? `。追加できなかったファイルがあります（${failedParts.join("、")}）。対応形式は ${SUPPORTED_BGM_AUDIO_LABEL} です` : "";
+      setBgmLibraryMessage(`${addedTracks.length}件のBGMを追加しました${conversionParts.length ? `（${conversionParts.join("、")}）` : ""}${warning}${failedNote}`);
     } catch {
-      setBgmLibraryMessage("BGMを保存できませんでした。容量やファイル形式を確認してください");
+      setBgmLibraryMessage(`BGMを保存できませんでした。容量やファイル形式を確認してください。対応形式は ${SUPPORTED_BGM_AUDIO_LABEL} です`);
     }
   }
 
@@ -1183,6 +1746,197 @@ function App() {
       })),
     }));
     setBgmLibraryMessage("追加BGMを削除しました");
+  }
+
+  async function optimizeSavedVideoBgms() {
+    const videoTracks = (state.sound?.customTracks || []).filter((track) => track.kind === "video");
+    if (!videoTracks.length) {
+      setBgmLibraryMessage("軽量化が必要な保存済み動画はありません");
+      return;
+    }
+    let extracted = 0;
+    let compacted = 0;
+    let kept = 0;
+    let failed = 0;
+    try {
+      for (const track of videoTracks) {
+        setBgmLibraryMessage(`保存済み動画「${track.name}」を軽くしています...`);
+        const blob = await getBgmBlob(track.id);
+        if (!blob) {
+          failed += 1;
+          continue;
+        }
+        const file = new File([blob], track.originalFileName || `${track.name}.mp4`, { type: blob.type || track.mimeType || "video/mp4" });
+        const prepared = await prepareVideoBgmBlob(file);
+        await putBgmBlob(track.id, prepared.blob);
+        if (prepared.status === "audio") extracted += 1;
+        if (prepared.status === "compact-video") compacted += 1;
+        if (prepared.status === "original-video") kept += 1;
+        updateBgmSound((sound) => ({
+          ...sound,
+          customTracks: (sound.customTracks || []).map((item) => (
+            item.id === track.id
+              ? { ...item, kind: prepared.kind, mimeType: prepared.mimeType, sourceKind: "video", videoProcess: prepared.status }
+              : item
+          )),
+        }));
+      }
+      const warning = kept ? "。一部の動画はアップロードは難しいです。短めの画面録画にすると移植しやすくなります" : "";
+      setBgmLibraryMessage(`保存済み動画を処理しました（音声抽出 ${extracted}件、軽量動画化 ${compacted}件、そのまま ${kept}件${failed ? `、失敗 ${failed}件` : ""}）${warning}`);
+    } catch {
+      setBgmLibraryMessage("保存済み動画の軽量化中に問題が起きました。もう一度お試しください");
+    }
+  }
+
+  async function exportBgmLibrary() {
+    try {
+      setPendingBgmExportFile(null);
+      setBgmLibraryMessage("プレイリストを書き出す準備をしています...");
+      const customTracks = [];
+      let skippedTracks = 0;
+      let skippedLargeTracks = 0;
+      const knownTracks = new Map((state.sound?.customTracks || []).map((track) => [track.id, track]));
+      const indexedDbTrackIds = await listBgmBlobIds().catch(() => []);
+      const exportTrackIds = [...new Set([...customTrackIdsFromSound(state.sound), ...indexedDbTrackIds])]
+        .filter((trackId) => !STANDARD_BGM_TRACK_IDS.includes(trackId));
+      for (const trackId of exportTrackIds) {
+        const blob = await getBgmBlob(trackId);
+        if (!blob) {
+          skippedTracks += 1;
+          continue;
+        }
+        if (blob.size > BGM_EXPORT_MAX_BLOB_BYTES) {
+          skippedLargeTracks += 1;
+          continue;
+        }
+        const track = knownTracks.get(trackId) || fallbackCustomTrack(trackId, blob);
+        customTracks.push({ ...track, dataUrl: await blobToDataUrl(blob) });
+      }
+      const payload = {
+        app: "usapon-timer-bgm-library",
+        exportedAt: new Date().toISOString(),
+        deviceName: "この端末",
+        selectedPlaylistId: state.sound?.selectedPlaylistId || DEFAULT_BGM_PLAYLIST_ID,
+        playlists: state.sound?.playlists || [],
+        customTracks,
+      };
+      const file = makeJsonFile(bgmLibraryFileName(), payload);
+      setPendingBgmExportFile(file);
+      const skippedNote = `${skippedTracks ? `、${skippedTracks}件スキップ` : ""}${skippedLargeTracks ? `、大きいBGM ${skippedLargeTracks}件は除外` : ""}`;
+      try {
+        if (navigator.userActivation?.isActive !== false) {
+          await shareFile(file);
+          setPendingBgmExportFile(null);
+          setBgmLibraryMessage(`プレイリストを書き出しました（追加BGM ${customTracks.length}件${skippedNote}）`);
+          return;
+        }
+      } catch (shareError) {
+        if (shareError?.name === "AbortError") {
+          setBgmLibraryMessage("保存をキャンセルしました。必要なら「保存場所を選ぶ」を押してください。");
+          return;
+        }
+      }
+      if (skippedLargeTracks) {
+        setBgmLibraryMessage(`プレイリストの準備ができました（追加BGM ${customTracks.length}件、大きいBGM ${skippedLargeTracks}件は除外）。画面録画は追加し直すと音声化できる場合があります。`);
+      } else {
+        setBgmLibraryMessage(`プレイリストの準備ができました（追加BGM ${customTracks.length}件${skippedNote}）。保存場所を選んでください。`);
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setBgmLibraryMessage("プレイリストを書き出せませんでした。容量や端末の空き容量を確認してください");
+    }
+  }
+
+  async function sharePreparedBgmLibrary() {
+    if (!pendingBgmExportFile) return;
+    try {
+      const result = await shareFile(pendingBgmExportFile).catch((error) => {
+        if (error?.name === "AbortError") throw error;
+        return downloadFile(pendingBgmExportFile);
+      });
+      if (result === "shared") {
+        setPendingBgmExportFile(null);
+        setBgmLibraryMessage("プレイリストを書き出しました。");
+      } else {
+        setBgmLibraryMessage("プレイリストをダウンロードしました。");
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setBgmLibraryMessage("保存をキャンセルしました。必要ならもう一度「保存場所を選ぶ」を押してください。");
+        return;
+      }
+      setBgmLibraryMessage("保存場所を開けませんでした。端末の共有設定を確認してください。");
+    }
+  }
+
+  function importBgmLibraryFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ""));
+        const library = extractBgmLibraryPayload(parsed);
+        if (!library || !Array.isArray(library.playlists)) throw new Error("invalid bgm library payload");
+        const ok = window.confirm("BGM音楽集を読み込みます。既存の作業記録は消えません。");
+        if (!ok) return;
+        const importedTracks = [];
+        let failedTracks = 0;
+        for (const track of library.customTracks || []) {
+          if (!track?.id || !track?.dataUrl) {
+            failedTracks += track?.id && !track?.dataUrl ? 1 : 0;
+            continue;
+          }
+          try {
+            const blob = await dataUrlToBlob(track.dataUrl);
+            await putBgmBlob(track.id, blob);
+            importedTracks.push({
+              id: String(track.id),
+              name: typeof track.name === "string" && track.name.trim() ? track.name.trim().slice(0, 80) : "追加BGM",
+              kind: track.kind === "video" ? "video" : "audio",
+              type: "custom",
+              mimeType: typeof track.mimeType === "string" ? track.mimeType : blob.type,
+              createdAt: typeof track.createdAt === "string" ? track.createdAt : new Date().toISOString(),
+              ...(track.sourceKind === "video" ? { sourceKind: "video" } : {}),
+              ...(["audio", "compact-video", "original-video"].includes(track.videoProcess) ? { videoProcess: track.videoProcess } : {}),
+              ...(typeof track.originalFileName === "string" ? { originalFileName: track.originalFileName.slice(0, 120) } : {}),
+            });
+          } catch {
+            failedTracks += 1;
+          }
+        }
+        const importedTrackIds = new Set(importedTracks.map((track) => track.id));
+        const existingCustomTrackIds = new Set((state.sound?.customTracks || []).map((track) => track.id));
+        const importedPlaylists = (library.playlists || [])
+          .filter((playlist) => playlist?.id && Array.isArray(playlist.trackIds))
+          .map((playlist, index) => ({
+            id: String(playlist.id),
+            name: typeof playlist.name === "string" && playlist.name.trim() ? playlist.name.trim().slice(0, 30) : `移植プレイリスト${index + 1}`,
+            trackIds: playlist.trackIds.filter((trackId) => (
+              STANDARD_BGM_TRACK_IDS.includes(trackId) || importedTrackIds.has(trackId) || existingCustomTrackIds.has(trackId)
+            )),
+          }))
+          .filter((playlist) => playlist.trackIds.length > 0);
+        if (!importedPlaylists.length && !importedTracks.length) throw new Error("empty bgm library payload");
+        const importedPlaylistIds = new Set(importedPlaylists.map((playlist) => playlist.id));
+        updateBgmSound((sound) => ({
+          ...sound,
+          customTracks: [
+            ...(sound.customTracks || []).filter((track) => !importedTrackIds.has(track.id)),
+            ...importedTracks,
+          ],
+          playlists: [
+            ...(sound.playlists || []).filter((playlist) => !importedPlaylistIds.has(playlist.id)),
+            ...importedPlaylists,
+          ],
+          selectedPlaylistId: importedPlaylistIds.has(library.selectedPlaylistId) ? library.selectedPlaylistId : sound.selectedPlaylistId,
+        }));
+        setBgmLibraryMessage(`プレイリストを読み込みました（プレイリスト ${importedPlaylists.length}件、追加BGM ${importedTracks.length}件${failedTracks ? `、${failedTracks}件スキップ` : ""}）`);
+      } catch {
+        setBgmLibraryMessage("BGM音楽集を読み込めませんでした。プレイリストを書き出したJSONファイルか確認してください。");
+      }
+    };
+    reader.onerror = () => setBgmLibraryMessage("BGM音楽集JSONを読み込めませんでした。");
+    reader.readAsText(file);
   }
 
   function toggleSoundPanel() {
@@ -1350,11 +2104,12 @@ function App() {
   function unlockOrSelect(outfit) {
     setState((current) => {
       const isUnlocked = current.unlockedOutfits.includes(outfit.id);
+      const price = outfitPrice(outfit);
       if (isUnlocked) return { ...current, selectedOutfitId: outfit.id };
-      if (current.points < outfit.cost) return current;
+      if (current.points < price) return current;
       return {
         ...current,
-        points: current.points - outfit.cost,
+        points: current.points - price,
         unlockedOutfits: [...current.unlockedOutfits, outfit.id],
         selectedOutfitId: outfit.id,
       };
@@ -1433,6 +2188,7 @@ function App() {
               setTab={setTab}
               tracks={allBgmTracks()}
               message={bgmLibraryMessage}
+              preparedExportFile={pendingBgmExportFile}
               selectPlaylist={selectBgmPlaylist}
               createPlaylist={createBgmPlaylist}
               renamePlaylist={renameBgmPlaylist}
@@ -1442,6 +2198,12 @@ function App() {
               removeTrack={removeTrackFromBgmPlaylist}
               moveTrack={moveBgmPlaylistTrack}
               deleteCustomTrack={deleteCustomBgmTrack}
+              renameCustomTrack={renameCustomBgmTrack}
+              previewTrack={toggleBgmLibraryPreview}
+              optimizeSavedVideos={optimizeSavedVideoBgms}
+              exportLibrary={exportBgmLibrary}
+              sharePreparedExport={sharePreparedBgmLibrary}
+              importLibrary={importBgmLibraryFile}
             />
           )}
           {tab === "subjects" && (
@@ -1678,6 +2440,7 @@ function BgmLibraryScreen({
   setTab,
   tracks,
   message,
+  preparedExportFile,
   selectPlaylist,
   createPlaylist,
   renamePlaylist,
@@ -1687,8 +2450,15 @@ function BgmLibraryScreen({
   removeTrack,
   moveTrack,
   deleteCustomTrack,
+  renameCustomTrack,
+  previewTrack,
+  optimizeSavedVideos,
+  exportLibrary,
+  sharePreparedExport,
+  importLibrary,
 }) {
   const fileInputRef = useRef(null);
+  const importLibraryInputRef = useRef(null);
   const sound = state.sound || {};
   const playlists = sound.playlists || [];
   const selectedPlaylist = playlists.find((playlist) => playlist.id === sound.selectedPlaylistId) || playlists[0];
@@ -1708,6 +2478,40 @@ function BgmLibraryScreen({
   return (
     <div className="screen bgm-library-screen">
       <TopBar title="BGM音楽集" points={state.points} onBack={() => setTab("settings")} />
+      <section className="bgm-panel">
+        <div className="section-head">
+          <b>iCloudで移植</b>
+          <span className="small-note">BGM音楽集だけを移せます</span>
+        </div>
+        <div className="bgm-transfer-actions">
+          <button className="bgm-transfer-button primary" type="button" onClick={exportLibrary}>
+            <Upload size={18} />
+            <span>プレイリストを書き出す</span>
+          </button>
+          {preparedExportFile && (
+            <button className="bgm-transfer-button primary" type="button" onClick={sharePreparedExport}>
+              <Upload size={18} />
+              <span>保存場所を選ぶ</span>
+            </button>
+          )}
+          <button className="bgm-transfer-button" type="button" onClick={() => importLibraryInputRef.current?.click()}>
+            <Download size={18} />
+            <span>プレイリストを読み込む</span>
+          </button>
+          <input
+            ref={importLibraryInputRef}
+            className="hidden-file-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              importLibrary(file);
+            }}
+          />
+        </div>
+        <p className="bgm-transfer-note">他の端末で書き出したBGM音楽集JSONをここから読み込めます。書き出し後は「ファイルに保存」からiCloud Driveなどを選べます。</p>
+      </section>
       <section className="bgm-panel">
         <div className="section-head">
           <b>プレイリスト</b>
@@ -1740,8 +2544,13 @@ function BgmLibraryScreen({
           <b>このリストで流す曲</b>
           <button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={15} />端末から追加</button>
         </div>
-        <input ref={fileInputRef} className="hidden-file-input" type="file" accept="audio/*,video/*" multiple onChange={handleFiles} />
+        <button className="bgm-compact-button" type="button" onClick={optimizeSavedVideos}>
+          <FileMusic size={16} />
+          保存済み動画を軽量化
+        </button>
+        <input ref={fileInputRef} className="hidden-file-input" type="file" accept={BGM_FILE_ACCEPT} multiple onChange={handleFiles} />
         {message && <p className="bgm-message">{message}</p>}
+        <p className="bgm-transfer-note">音声は {SUPPORTED_BGM_AUDIO_LABEL} に対応しています。iPhone/iPadのショートカットで作ったM4Aもそのまま選べます。</p>
         <div className="bgm-track-list">
           {selectedTrackIds.length ? selectedTrackIds.map((trackId, index) => {
             const track = trackById(trackId);
@@ -1751,8 +2560,9 @@ function BgmLibraryScreen({
                 <span className="track-kind"><FileMusic size={18} /></span>
                 <div>
                   <strong>{track.name}</strong>
-                  <small>{track.type === "standard" ? "標準曲" : track.kind === "video" ? "画面録画/動画" : "追加音楽"}</small>
+                  <small>{trackLabel(track)}</small>
                 </div>
+                <button type="button" aria-label="試聴" onClick={() => previewTrack(track.id)}><CirclePlay size={15} /></button>
                 <button type="button" aria-label="上へ" onClick={() => moveTrack(selectedPlaylist.id, index, -1)} disabled={index === 0}><ArrowUp size={15} /></button>
                 <button type="button" aria-label="下へ" onClick={() => moveTrack(selectedPlaylist.id, index, 1)} disabled={index === selectedTrackIds.length - 1}><ArrowDown size={15} /></button>
                 <button type="button" aria-label="リストから外す" onClick={() => removeTrack(selectedPlaylist.id, index)}><Trash2 size={15} /></button>
@@ -1769,14 +2579,32 @@ function BgmLibraryScreen({
           <b>曲一覧</b>
           <span className="small-note">標準曲と追加曲を選べます</span>
         </div>
-        <BgmCatalog title="標準曲" tracks={standardTracks} playlistId={selectedPlaylist?.id} addTrack={addTrack} />
-        <BgmCatalog title="追加した曲・画面録画" tracks={customTracks} playlistId={selectedPlaylist?.id} addTrack={addTrack} deleteCustomTrack={deleteCustomTrack} />
+        <BgmCatalog title="標準曲" tracks={standardTracks} playlistId={selectedPlaylist?.id} addTrack={addTrack} previewTrack={previewTrack} />
+        <BgmCatalog
+          title="追加した曲・画面録画"
+          tracks={customTracks}
+          playlistId={selectedPlaylist?.id}
+          addTrack={addTrack}
+          deleteCustomTrack={deleteCustomTrack}
+          renameCustomTrack={renameCustomTrack}
+          previewTrack={previewTrack}
+        />
       </section>
     </div>
   );
 }
 
-function BgmCatalog({ title, tracks, playlistId, addTrack, deleteCustomTrack }) {
+function trackLabel(track) {
+  if (track.type === "standard") return "標準曲";
+  if (track.videoProcess === "audio" || track.sourceKind === "video") {
+    if (track.kind === "audio") return "画面録画から音声化";
+    if (track.videoProcess === "compact-video") return "画面録画を軽量化";
+    if (track.videoProcess === "original-video") return "画面録画/動画（アップロードは難しいです）";
+  }
+  return track.kind === "video" ? "画面録画/動画" : "追加音楽";
+}
+
+function BgmCatalog({ title, tracks, playlistId, addTrack, deleteCustomTrack, renameCustomTrack, previewTrack }) {
   return (
     <div className="bgm-catalog">
       <h3>{title}</h3>
@@ -1784,9 +2612,21 @@ function BgmCatalog({ title, tracks, playlistId, addTrack, deleteCustomTrack }) 
         <article className="bgm-catalog-row" key={track.id}>
           <span className="track-kind"><FileMusic size={18} /></span>
           <div>
-            <strong>{track.name}</strong>
-            <small>{track.type === "standard" ? "標準曲" : track.kind === "video" ? "画面録画/動画" : "追加音楽"}</small>
+            {track.type === "custom" && renameCustomTrack ? (
+              <input
+                className="track-name-input"
+                type="text"
+                value={track.name}
+                maxLength={80}
+                aria-label={`${track.name}の曲名`}
+                onChange={(event) => renameCustomTrack(track.id, event.target.value)}
+              />
+            ) : (
+              <strong>{track.name}</strong>
+            )}
+            <small>{trackLabel(track)}</small>
           </div>
+          <button type="button" aria-label="試聴" onClick={() => previewTrack(track.id)}><CirclePlay size={15} /></button>
           <button type="button" onClick={() => addTrack(playlistId, track.id)}>追加</button>
           {track.type === "custom" && (
             <button type="button" className="danger-icon" aria-label="端末保存から削除" onClick={() => deleteCustomTrack(track.id)}>
@@ -2186,19 +3026,110 @@ function SessionSubjectSheet({ subjects, editingSession, updateSessionSubject, c
 function WardrobeScreen({ state, outfits, unlockOrSelect, setTab }) {
   const [purchaseOutfit, setPurchaseOutfit] = useState(null);
   const [previewOutfit, setPreviewOutfit] = useState(null);
+  const [outfitMessage, setOutfitMessage] = useState("");
   const purchaseUnlocked = purchaseOutfit ? state.unlockedOutfits.includes(purchaseOutfit.id) : false;
-  const purchaseCanBuy = purchaseOutfit ? state.points >= purchaseOutfit.cost : false;
+  const purchasePrice = purchaseOutfit ? outfitPrice(purchaseOutfit) : 0;
+  const purchaseOnSale = purchaseOutfit ? outfitSaleActive(purchaseOutfit) : false;
+  const purchaseCanBuy = purchaseOutfit ? state.points >= purchasePrice : false;
   function handleOutfitTap(outfit) {
-    if (state.unlockedOutfits.includes(outfit.id)) { unlockOrSelect(outfit); return; }
+    if (state.unlockedOutfits.includes(outfit.id)) {
+      unlockOrSelect(outfit);
+      setOutfitMessage(`${outfit.name}に着替えました`);
+      return;
+    }
     setPurchaseOutfit(outfit);
   }
-  return <div className="screen wardrobe-screen"><TopBar title="ショップ" points={state.points} onBack={() => setTab("home")} /><div className="shop-tabs"><button className="active" type="button">おようふく</button><button type="button">家具</button></div><div className="outfit-grid">{outfits.map((outfit) => { const unlocked = state.unlockedOutfits.includes(outfit.id); const selected = state.selectedOutfitId === outfit.id; return <article className={`outfit-card ${selected ? "selected" : ""} ${!unlocked ? "locked" : ""}`} key={outfit.id}><button className="zoom" type="button" aria-label={`${outfit.name}を大きく表示`} onClick={() => setPreviewOutfit(outfit)}>⌕</button><img src={asset(`crops/${outfit.id}.png`)} alt="" /><strong>{outfit.name}</strong><button className="outfit-action" type="button" onClick={() => handleOutfitTap(outfit)} disabled={selected}>{unlocked ? (selected ? "着用中" : "着る") : `${outfit.cost.toLocaleString()} pt`}</button></article>; })}</div>{purchaseOutfit && <div className="purchase-overlay" role="dialog" aria-modal="true" aria-label="購入確認"><button className="purchase-scrim" type="button" aria-label="閉じる" onClick={() => setPurchaseOutfit(null)} /><section className="purchase-dialog"><img src={asset(`crops/${purchaseOutfit.id}.png`)} alt="" /><div><span>{purchaseOutfit.name}</span><strong>{purchaseOutfit.cost.toLocaleString()}ptで交換しますか？</strong>{!purchaseCanBuy && <small>ptが足りません</small>}</div><div className="purchase-actions"><button type="button" onClick={() => setPurchaseOutfit(null)}>キャンセル</button><button className="primary" type="button" onClick={() => { if (!purchaseCanBuy || purchaseUnlocked) return; unlockOrSelect(purchaseOutfit); setPurchaseOutfit(null); }} disabled={!purchaseCanBuy}>交換する</button></div></section></div>}{previewOutfit && <OutfitPreview outfit={previewOutfit} close={() => setPreviewOutfit(null)} />}</div>;
+
+  function confirmPurchase() {
+    if (!purchaseOutfit || !purchaseCanBuy || purchaseUnlocked) return;
+    unlockOrSelect(purchaseOutfit);
+    setOutfitMessage(`${purchaseOutfit.name}を交換して着替えました`);
+    setPurchaseOutfit(null);
+  }
+
+  return (
+    <div className={`screen wardrobe-screen ${purchaseOutfit || previewOutfit ? "modal-open" : ""}`}>
+      <TopBar title="ショップ" points={state.points} onBack={() => setTab("home")} />
+      <div className="shop-tabs"><button className="active" type="button">おようふく</button><button type="button">家具</button></div>
+      {outfitMessage && <p className="outfit-message" role="status">{outfitMessage}</p>}
+      <div className="outfit-grid">
+        {outfits.map((outfit) => {
+          const unlocked = state.unlockedOutfits.includes(outfit.id);
+          const selected = state.selectedOutfitId === outfit.id;
+          const price = outfitPrice(outfit);
+          const onSale = outfitSaleActive(outfit);
+          return (
+            <article className={`outfit-card ${selected ? "selected" : ""} ${!unlocked ? "locked" : ""}`} key={outfit.id}>
+              <button className="zoom" type="button" aria-label={`${outfit.name}を大きく表示`} onClick={() => setPreviewOutfit(outfit)}>⌕</button>
+              <img src={asset(`crops/${outfit.id}.png`)} alt="" />
+              <strong>{outfit.name}</strong>
+              <button className="outfit-action" type="button" onClick={() => handleOutfitTap(outfit)} disabled={selected}>
+                {unlocked ? (selected ? "着用中" : "着る") : (
+                  <>
+                    {onSale && <span className="original-price">{outfit.cost.toLocaleString()} pt</span>}
+                    {price.toLocaleString()} pt
+                  </>
+                )}
+              </button>
+              {onSale && !unlocked && <small className="sale-note">{outfitSaleLabel(outfit)}</small>}
+            </article>
+          );
+        })}
+      </div>
+      {purchaseOutfit && (
+        <div className="purchase-overlay" role="dialog" aria-modal="true" aria-label="購入確認">
+          <button className="purchase-scrim" type="button" aria-label="閉じる" onClick={() => setPurchaseOutfit(null)} />
+          <section className="purchase-dialog">
+            <img src={asset(`crops/${purchaseOutfit.id}.png`)} alt="" />
+            <div>
+              <span>{purchaseOutfit.name}</span>
+              <strong>{purchasePrice.toLocaleString()}ptで交換しますか？</strong>
+              {purchaseOnSale && <small>新発売セール中: 通常 {purchaseOutfit.cost.toLocaleString()}pt / {outfitSaleLabel(purchaseOutfit)}</small>}
+              {!purchaseCanBuy && <small>ptが足りません</small>}
+            </div>
+            <div className="purchase-actions">
+              <button type="button" onClick={() => setPurchaseOutfit(null)}>キャンセル</button>
+              <button className="primary" type="button" onClick={confirmPurchase} disabled={!purchaseCanBuy}>交換する</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {previewOutfit && <OutfitPreview outfit={previewOutfit} close={() => setPreviewOutfit(null)} />}
+    </div>
+  );
 }
 
 function ClosetScreen({ state, outfits, unlockOrSelect, setTab }) {
   const [previewOutfit, setPreviewOutfit] = useState(null);
+  const [outfitMessage, setOutfitMessage] = useState("");
   const unlockedOutfits = outfits.filter((outfit) => state.unlockedOutfits.includes(outfit.id));
-  return <div className="screen wardrobe-screen closet-screen"><TopBar title="クローゼット" points={state.points} onBack={() => setTab("home")} /><div className="closet-toolbar"><span><Shirt size={16} />交換済み</span><button type="button" onClick={() => setTab("wardrobe")}><ShoppingBag size={15} />ショップ</button></div><div className="outfit-grid">{unlockedOutfits.map((outfit) => { const selected = state.selectedOutfitId === outfit.id; return <article className={`outfit-card ${selected ? "selected" : ""}`} key={outfit.id}><button className="zoom" type="button" aria-label={`${outfit.name}を大きく表示`} onClick={() => setPreviewOutfit(outfit)}>⌕</button><img src={asset(`crops/${outfit.id}.png`)} alt="" /><strong>{outfit.name}</strong><button className="outfit-action" type="button" onClick={() => unlockOrSelect(outfit)} disabled={selected}>{selected ? "着用中" : "着る"}</button></article>; })}</div>{previewOutfit && <OutfitPreview outfit={previewOutfit} close={() => setPreviewOutfit(null)} />}</div>;
+
+  function wearOutfit(outfit) {
+    unlockOrSelect(outfit);
+    setOutfitMessage(`${outfit.name}に着替えました`);
+  }
+
+  return (
+    <div className="screen wardrobe-screen closet-screen">
+      <TopBar title="クローゼット" points={state.points} onBack={() => setTab("home")} />
+      <div className="closet-toolbar"><span><Shirt size={16} />交換済み</span><button type="button" onClick={() => setTab("wardrobe")}><ShoppingBag size={15} />ショップ</button></div>
+      {outfitMessage && <p className="outfit-message" role="status">{outfitMessage}</p>}
+      <div className="outfit-grid">
+        {unlockedOutfits.map((outfit) => {
+          const selected = state.selectedOutfitId === outfit.id;
+          return (
+            <article className={`outfit-card ${selected ? "selected" : ""}`} key={outfit.id}>
+              <button className="zoom" type="button" aria-label={`${outfit.name}を大きく表示`} onClick={() => setPreviewOutfit(outfit)}>⌕</button>
+              <img src={asset(`crops/${outfit.id}.png`)} alt="" />
+              <strong>{outfit.name}</strong>
+              <button className="outfit-action" type="button" onClick={() => wearOutfit(outfit)} disabled={selected}>{selected ? "着用中" : "着る"}</button>
+            </article>
+          );
+        })}
+      </div>
+      {previewOutfit && <OutfitPreview outfit={previewOutfit} close={() => setPreviewOutfit(null)} />}
+    </div>
+  );
 }
 
 function OutfitPreview({ outfit, close }) {
